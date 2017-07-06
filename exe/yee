@@ -1,0 +1,274 @@
+#!/usr/bin/env ruby
+
+require "xilight"
+require "dry/cli"
+
+module Xilight
+  module CLI
+
+    def self.config_path
+      File.join(Dir.home, ".config", ".yeelights")
+    end
+
+    def self.config=(config)
+      IO.write(config_path, JSON.dump(config))
+    end
+
+    def self.config
+      JSON.load(IO.read(config_path))
+    rescue
+      {}
+    end
+
+    def self.get_light(index, name=nil)
+      lights = ::Xilight::CLI.config['yeelights']
+      light_attribs = if name && name != ''
+        lights.find{|l| l['name'].downcase.strip == name.downcase.strip }
+      else
+        lights[index.to_i]
+      end
+      ::Xilight::Yeelight.new(light_attribs.map{|k,v| [k.to_sym, v]}.to_h)
+    rescue
+      puts "Couldn't find light with " + ((name && name != '') ? "name #{name}" : "ID #{index}")
+      puts "Known lights:"
+      puts self.config.fetch('yeelights', []).map.with_index{|light, i| "\tLight ##{i} => #{(light['name'] || light['id'])}@#{light['host']}"}
+      exit(1)
+    end
+
+    module Commands
+      extend Dry::CLI::Registry
+
+      class Version < Dry::CLI::Command
+        desc "Print version"
+
+        example [
+          ""
+        ]
+
+        def call(*)
+          puts ::Xilight::VERSION
+        end
+      end
+
+      class Discover < Dry::CLI::Command
+        desc "Discover Yeelights and save to ~/.config/.yeelights"
+
+        example [
+          ""
+        ]
+
+        def call(**)
+          current_config = ::Xilight::CLI.config
+          current_lights = current_config.fetch('yeelights', [])
+          ::Xilight::Yeelight.discover.each do |light|
+            current_lights.reject!{|l| l['id'] == light.id}
+            current_lights << light.instance_variables.map{|v| [v.to_s[1..-1], light.instance_variable_get(v)] }.to_h
+          end
+          current_config['yeelights'] = current_lights
+          current_lights.each_with_index do |light, index|
+            puts "Light ##{index} => #{(light['name'] || light['id'])}@#{light['host']}"
+          end
+          ::Xilight::CLI.config = current_config
+        end
+      end
+
+      class List < Dry::CLI::Command
+        desc "List known Yeelights"
+
+        example [
+          ""
+        ]
+
+        def call(**)
+          current_config = ::Xilight::CLI.config
+          current_lights = current_config.fetch('yeelights', [])
+          current_lights.each_with_index do |light, index|
+            puts "Light ##{index} => #{(light['name'] || light['id'])}@#{light['host']}"
+          end
+        end
+      end
+
+      class Rgb  < Dry::CLI::Command
+        desc "Set RGB for Yeelight"
+        argument :r, desc: "Red (0-255)", required: true
+        argument :g, desc: "Green (0-255)", required: true
+        argument :b, desc: "Blue (0-255)", required: true
+        option :light, desc: "ID/index of Yeelight to target", default: "0", aliases: ["-l"]
+        option :name, desc: "Name of Yeelight to target", default: nil, aliases: ["-n"]
+
+        example [
+          "255 0 0 # set light to red (red 255, green 0, blue 0)",
+          "0 0 180 -n foo# set light with name foo to blue (red 0, green 0, blue 180)",
+          "255 255 255 -l 3# set light #3 to white (red 255, green 255, blue 255)",
+        ]
+
+        def call(r:, g:, b:, light: 0, name: nil, **)
+          light =::Xilight::CLI.get_light(light, name)
+          as_hex = [r,g,b].map{|x| x.to_i.to_s(16).rjust(2, '0') }.join
+          light.rgb = as_hex.to_i(16)
+        end
+      end
+
+      class Hsv  < Dry::CLI::Command
+        desc "Set HSV for Yeelight"
+        argument :h, desc: "Hue (0-359)", required: true, type: 'integer'
+        argument :s, desc: "Saturation (0-100)", required: true, type: 'integer'
+        option :light, desc: "ID/index of Yeelight to target", default: "0", aliases: ["-l"]
+        option :name, desc: "Name of Yeelight to target", default: nil, aliases: ["-n"]
+
+        example [
+          "180 40 # set hue to 180 and saturation to 40",
+          "200 20 -n foo# set light with name foo to hue: 200, saturation: 20",
+          "359 90 -l 3# set light #3  to hue: 359, saturation: 90",
+        ]
+
+        def call(h:, s:, light: 0, name: nil, **)
+          light =::Xilight::CLI.get_light(light, name)
+          light.set_hsv(h.to_i, s.to_i)
+        end
+      end
+
+      class Bright  < Dry::CLI::Command
+        desc "Set Brightness for Yeelight"
+        argument :brightness, desc: "Brightness (0-100)", required: true
+        option :light, desc: "ID/index of Yeelight to target", default: "0", aliases: ["-l"]
+        option :name, desc: "Name of Yeelight to target", default: nil, aliases: ["-n"]
+
+        example [
+          "100 # full brightness",
+          "50 -n foo  # 50% brightness for light with name foo ",
+          "25 -l 3  # 25% brightness for light#3 "
+        ]
+
+        def call(brightness:, light: 0, name: nil, **)
+          light =::Xilight::CLI.get_light(light, name)
+          light.bright = brightness.to_i
+        end
+      end
+
+      class On < Dry::CLI::Command
+        desc "Turn on Yeelight"
+        option :light, desc: "ID/index of Yeelight to target", default: "0", aliases: ["-l"]
+        option :name, desc: "Name of Yeelight to target", default: nil, aliases: ["-n"]
+
+        example [
+          "on # turn default/first light on",
+          "on -n kitchen # turn light with name 'kitchen' on",
+          "on -l 3 # turn light #3 on"
+        ]
+        def call(light: 0, name: nil, **)
+          light =::Xilight::CLI.get_light(light, name)
+          light.power = 'on'
+        end
+      end
+
+      class Off < Dry::CLI::Command
+        desc "Turn Off Yeelight"
+        option :light, desc: "ID/index of Yeelight to target", default: "0", aliases: ["-l"]
+        option :name, desc: "Name of Yeelight to target", default: nil, aliases: ["-n"]
+
+        example [
+          "off # turn default/first light off",
+          "off -n kitchen # turn light with name 'kitchen' off",
+          "off -l 3 # turn light #3 off"
+        ]
+
+        def call(light: 0, name: nil, **)
+          light =::Xilight::CLI.get_light(light, name)
+          light.power = 'off'
+        end
+      end
+
+      class Toggle < Dry::CLI::Command
+        desc "Toggle Yeelight"
+        option :light, desc: "ID/index of Yeelight to target", default: "0", aliases: ["-l"]
+        option :name, desc: "Name of Yeelight to target", default: nil, aliases: ["-n"]
+
+        example [
+          "toggle # toggle default/first light",
+          "toggle -n kitchen # toggle light with name 'kitchen'",
+          "toggle -l 3 # toggle light #3"
+        ]
+
+        def call(light: 0, name: nil, **)
+          light =::Xilight::CLI.get_light(light, name)
+          light.toggle
+        end
+      end
+
+      class Name < Dry::CLI::Command
+        desc "Set name for Yeelight"
+        argument :name, required: true, desc: "Name to set for light", default: nil, aliases: ["-n"]
+        option :light, desc: "ID/index of Yeelight to target", default: "0", aliases: ["-l"]
+
+        example [
+          "name -l 1 foo # Set the name for light#1 to \"foo\""
+        ]
+
+        def call(light: 0, name: nil, **)
+          yeelight =::Xilight::CLI.get_light(light)
+          yeelight.name = name
+          config = ::Xilight::CLI.config
+          config['yeelights'][light.to_i]['name'] = name
+          ::Xilight::CLI.config = config
+        end
+      end
+
+      COLORS = {
+        red: [255, 0, 0],
+        orange: [255, 128, 0],
+        yellow: [255, 255, 0],
+        lightgreen: [128, 255, 0],
+        green: [0, 255, 0],
+        turquoise: [0, 255, 128],
+        cyan: [0, 255, 255],
+        lightblue: [0, 128, 255],
+        blue: [0, 0, 255],
+        indigo: [128, 0, 255],
+        purple: [255, 0, 255],
+        magenta: [255, 0, 128],
+        silver: [128, 128, 128],
+        white: [255, 255, 255],
+      }
+
+      COLORS.each do |color, values|
+        class_name = color.to_s[0].upcase + color.to_s[1..-1]
+        Object.const_set(class_name, Class.new(Dry::CLI::Command) do
+          desc "Set yeelight to color #{color}"
+          example [
+            "#{color}"
+          ]
+
+          option :light, desc: "ID/index of Yeelight to target", default: "0", aliases: ["-l"]
+          option :name, desc: "Name of Yeelight to target", default: nil, aliases: ["-n"]
+
+          define_method(:call) do |light: 0, name: nil|
+            light =::Xilight::CLI.get_light(light, name)
+            as_hex = values.map{|x| x.to_i.to_s(16).rjust(2, '0') }.join
+            light.rgb = as_hex.to_i(16)
+          end
+        end)
+      end
+
+      register "color", aliases: ["c"] do |prefix|
+        COLORS.keys.each do |color|
+          class_name = color.to_s[0].upcase + color.to_s[1..-1]
+          prefix.register color.to_s, Object.const_get(class_name)
+        end
+      end
+
+      register "version",  Version, aliases: ["v", "-v", "--version"]
+      register "discover", Discover, aliases: ["d"]
+      register "rgb",      Rgb
+      register "hsv",      Hsv
+      register "on",       On, aliases: ["o"]
+      register "off",      Off, aliases: ["x"]
+      register "toggle",   Toggle, aliases: ["t"]
+      register "name",     Name, aliases: ["n"]
+      register "list",     List, aliases: ["ls"]
+      register "bright",   Bright, aliases: ["brightness", "b"]
+    end
+  end
+end
+
+Dry::CLI.new(Xilight::CLI::Commands).call
