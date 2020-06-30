@@ -20,19 +20,41 @@ module Xilight
       {}
     end
 
-    def self.get_light(index, name=nil)
+    def self.rgb_to_hex(r,g,b)
+      [r,g,b].map{|x| x.to_i.to_s(16).rjust(2, '0') }.join
+    end
+
+    def self.rgb_to_i(r,g,b)
+      rgb_to_hex(r,g,b).to_i(16)
+    end
+
+    def self.get_light(index, name=nil, attempt: 0)
       lights = ::Xilight::CLI.config['yeelights']
       light_attribs = if name && name != ''
         lights.find{|l| l['name'].downcase.strip == name.downcase.strip }
       else
         lights[index.to_i]
       end
-      ::Xilight::Yeelight.new(light_attribs.map{|k,v| [k.to_sym, v]}.to_h)
+      light = ::Xilight::Yeelight.new(**light_attribs.map{|k,v| [k.to_sym, v]}.to_h)
+      unless light.available?
+        self.discover
+        get_light(index, name, attempt: 1) if attempt.zero?
+      else
+        light
+      end
     rescue
       puts "Couldn't find light with " + ((name && name != '') ? "name #{name}" : "ID #{index}")
       puts "Known lights:"
       puts self.config.fetch('yeelights', []).map.with_index{|light, i| "\tLight ##{i} => #{(light['name'] || light['id'])}@#{light['host']}"}
       exit(1)
+    end
+
+    def self.discover
+      ::Xilight::CLI.config = {
+        'yeelights' => ::Xilight::Yeelight.discover.each do |light|
+          light.instance_variables.map{|v| [v.to_s[1..-1], light.instance_variable_get(v)] }.to_h
+        end
+      }
     end
 
     module Commands
@@ -58,11 +80,7 @@ module Xilight
         ]
 
         def call(**)
-          ::Xilight::CLI.config = {
-            'yeelights' => ::Xilight::Yeelight.discover.each do |light|
-              light.instance_variables.map{|v| [v.to_s[1..-1], light.instance_variable_get(v)] }.to_h
-            end
-          }
+          ::Xilight::CLI.discover
         end
       end
 
@@ -98,8 +116,7 @@ module Xilight
 
         def call(r:, g:, b:, light: 0, name: nil, **)
           light =::Xilight::CLI.get_light(light, name)
-          as_hex = [r,g,b].map{|x| x.to_i.to_s(16).rjust(2, '0') }.join
-          light.rgb = as_hex.to_i(16)
+          light.rgb = ::Xilight::CLI.rgb_to_i(r,g,b)
         end
       end
 
@@ -208,6 +225,44 @@ module Xilight
         end
       end
 
+      module ColorFlow
+        class On < Dry::CLI::Command
+          desc "Start ColorFlow"
+          option :light, desc: "ID/index of Yeelight to target", default: "0", aliases: ["-l"]
+          option :name, desc: "Name of Yeelight to target", default: nil, aliases: ["-n"]
+
+          example [
+            "on # start color flow on default/first light",
+            "on -n kitchen # start color flow on light with name 'kitchen'",
+            "on -l 3 # start color flow on light #3"
+          ]
+          def call(light: 0, name: nil, **)
+            light =::Xilight::CLI.get_light(light, name)
+            flow_expression = COLORS.values.first(12).each_slice(2).map(&:first).map do |(r,g,b)|
+              "1000,2,#{::Xilight::CLI.rgb_to_i(r,g,b)},100"
+            end.join(',')
+            light.start_cf(0, 1, flow_expression)
+          end
+        end
+
+        class Off < Dry::CLI::Command
+          desc "Stop ColorFlow"
+          option :light, desc: "ID/index of Yeelight to target", default: "0", aliases: ["-l"]
+          option :name, desc: "Name of Yeelight to target", default: nil, aliases: ["-n"]
+
+          example [
+            "off # start color flow on default/first light",
+            "off -n kitchen # start color flow on light with name 'kitchen'",
+            "off -l 3 # start color flow on light #3"
+          ]
+
+          def call(light: 0, name: nil, **)
+            light =::Xilight::CLI.get_light(light, name)
+            light.power = 'off'
+          end
+        end
+      end
+
       COLORS = {
         red: [255, 0, 0],
         orange: [255, 128, 0],
@@ -249,6 +304,11 @@ module Xilight
           class_name = color.to_s[0].upcase + color.to_s[1..-1]
           prefix.register color.to_s, Object.const_get(class_name)
         end
+      end
+
+      register "color_flow", aliases: ["cf"] do |prefix|
+        prefix.register "on", ColorFlow::On, aliases: ["o"]
+        prefix.register "off", ColorFlow::Off, aliases: ["x"]
       end
 
       register "version",  Version, aliases: ["v", "-v", "--version"]
