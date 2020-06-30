@@ -20,19 +20,33 @@ module Xilight
       {}
     end
 
-    def self.get_light(index, name=nil)
+    def self.get_light(index, name=nil, attempt: 0)
       lights = ::Xilight::CLI.config['yeelights']
       light_attribs = if name && name != ''
         lights.find{|l| l['name'].downcase.strip == name.downcase.strip }
       else
         lights[index.to_i]
       end
-      ::Xilight::Yeelight.new(light_attribs.map{|k,v| [k.to_sym, v]}.to_h)
+      light = ::Xilight::Yeelight.new(light_attribs.map{|k,v| [k.to_sym, v]}.to_h)
+      unless light.available?
+        self.discover
+        get_light(index, name, attempt: 1) if attempt.zero?
+      else
+        light
+      end
     rescue
       puts "Couldn't find light with " + ((name && name != '') ? "name #{name}" : "ID #{index}")
       puts "Known lights:"
       puts self.config.fetch('yeelights', []).map.with_index{|light, i| "\tLight ##{i} => #{(light['name'] || light['id'])}@#{light['host']}"}
       exit(1)
+    end
+
+    def self.discover
+      ::Xilight::CLI.config = {
+        'yeelights' => ::Xilight::Yeelight.discover.each do |light|
+          light.instance_variables.map{|v| [v.to_s[1..-1], light.instance_variable_get(v)] }.to_h
+        end
+      }
     end
 
     module Commands
@@ -58,11 +72,7 @@ module Xilight
         ]
 
         def call(**)
-          ::Xilight::CLI.config = {
-            'yeelights' => ::Xilight::Yeelight.discover.each do |light|
-              light.instance_variables.map{|v| [v.to_s[1..-1], light.instance_variable_get(v)] }.to_h
-            end
-          }
+          ::Xilight::CLI.discover
         end
       end
 
@@ -135,6 +145,7 @@ module Xilight
         ]
 
         def call(brightness:, light: 0, name: nil, **)
+          binding.pry
           light =::Xilight::CLI.get_light(light, name)
           light.bright = brightness.to_i
         end
