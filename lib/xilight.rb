@@ -24,6 +24,22 @@ module Xilight
       @port       = location[/(?!<:)\d+$/]
     end
 
+    def available?()
+      begin
+        Timeout::timeout(1) do
+          begin
+            s = TCPSocket.new(@host, @port)
+            s.close
+            return true
+          rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH
+            return false
+          end
+        end
+      rescue Timeout::Error
+      end
+      return false
+    end
+
     def request(cmd)
       begin
         Timeout.timeout(0.5) do
@@ -110,8 +126,8 @@ module Xilight
     # This method is used to start a color flow. Color flow is a series of smart
     # LED visible state changes. It can be either brightness changing, color changing
     # or color temperature changing
-    def start_cf(count, action, flow_expression)
-      request({id: 9,method: 'set_power', params: [count,action,flow_expression]})
+    def start_cf(count=0, action=1, flow_expression="1000,2,2700,100,500,1,255,10,5000,7,0,0,500,2,5000,1")
+      request({id: 9, method: 'start_cf', params: [count,action,flow_expression]})
     end
 
     # This method is used to stop a running color flow.
